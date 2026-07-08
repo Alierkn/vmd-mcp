@@ -6,6 +6,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- MCP tool annotations for read-only helpers, render writes, and the `run_tcl`
+  escape hatch.
+- ImageMagick `magick` / `convert` fallback for TGA to PNG conversion when
+  macOS `sips` is unavailable.
+
+### Changed
+- Hardened typed tools with explicit validation for file inputs, selections,
+  render options, dimensions, timeouts, and render output paths.
+- `render_image` now writes under `VMD_MCP_ROOT` by default; absolute outputs
+  require `VMD_MCP_ALLOW_ABSOLUTE_OUTPUTS=1`.
+- `run_tcl` now returns bounded stdout/stderr output and rejects empty or overly
+  large scripts.
+
+### Security
+- User-controlled Tcl literals are now passed through brace-group escaping to
+  reduce accidental command execution in typed tools.
+
 ## [0.1.0] — 2026-07-07
 
 ### Added

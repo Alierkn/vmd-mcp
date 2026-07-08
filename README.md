@@ -32,8 +32,11 @@ without you writing a line of Tcl.**
   optional least-squares fit), radius of gyration, and SASA.
 - **Headless rendering** — ray-traces images with VMD's built-in Tachyon and saves PNG, no
   X11 / display required. Choose representation, coloring, frame, and resolution.
+- **Safer local defaults** — structure inputs must exist, render outputs stay under
+  `VMD_MCP_ROOT` by default, high-risk tool inputs are bounded, and MCP tool annotations mark
+  read-only, write, and escape-hatch behavior.
 - **Hybrid tool design** — typed helpers for common jobs **plus** a generic `run_tcl` escape
-  hatch that runs any VMD Tcl and returns your `@@VMDMCP@@`-tagged results.
+  hatch that runs any VMD Tcl and returns bounded output plus your `@@VMDMCP@@`-tagged results.
 - **Robust in non-interactive sessions** — works around VMD's `-eofexit`/stdin and
   `display resize` quirks that otherwise break headless runs (see [How it works](#how-it-works)).
 - **Zero-config discovery** — finds VMD on `PATH` or in macOS `.app` bundles (override with `VMD_BIN`).
@@ -108,6 +111,7 @@ Check: `claude mcp list` → `vmd: … ✔ Connected`.
 |---------|---------|---------|
 | `VMD_BIN` | auto (`PATH`, then macOS `.app`) | Path to the VMD launcher |
 | `VMD_MCP_ROOT` | `~/vmd-mcp/output` | Where rendered images / scratch are written |
+| `VMD_MCP_ALLOW_ABSOLUTE_OUTPUTS` | unset / `0` | Set to `1` only if `render_image.output` should be allowed outside `VMD_MCP_ROOT` |
 
 ## Example prompts
 
@@ -129,7 +133,18 @@ Two headless-specific gotchas are handled for you:
   the `-size W H` command-line flag.
 
 Images are ray-traced with `render TachyonInternal` (built-in, no external renderer needed) and
-converted TGA → PNG via `sips`/ImageMagick when available.
+converted TGA → PNG via macOS `sips`, ImageMagick `magick`, or ImageMagick `convert` when
+available. If no converter is present, the `.tga` is kept.
+
+## Safety model
+
+`vmd-mcp` is a local automation server, not a remote multi-user service. Typed tools validate
+paths, dimensions, timeouts, selections, render methods, and color modes before launching VMD.
+`render_image` writes below `VMD_MCP_ROOT` unless `VMD_MCP_ALLOW_ABSOLUTE_OUTPUTS=1` is set.
+
+The `run_tcl` tool intentionally remains an escape hatch for advanced VMD workflows. It is marked
+as a destructive MCP tool, capped by timeout and output size, and should only be used with Tcl you
+trust.
 
 ## Development
 
@@ -138,6 +153,8 @@ git clone https://github.com/Alierkn/vmd-mcp && cd vmd-mcp
 uv sync --extra dev
 uv run pytest        # VMD-dependent tests auto-skip if VMD is absent
 uv run ruff check .
+uv build
+uvx twine check dist/*
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
