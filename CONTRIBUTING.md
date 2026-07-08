@@ -22,13 +22,18 @@ CI runs the same checks on Python 3.10–3.13.
 
 ## Adding a new analysis tool
 
-1. Add an `@mcp.tool()`-decorated function in `src/vmd_mcp/server.py`.
+1. Add an `@mcp.tool(annotations=...)`-decorated function in `src/vmd_mcp/server.py`
+   using the closest existing annotation: read-only, write, or escape hatch.
 2. Build its Tcl with the `_load_block()` helper and emit results with
    `puts "@@VMDMCP@@ key=value ..."`, then run it via `_run_tcl()`.
-3. Parse the markers back into structured data (`_parse_markers`, `_f`).
-4. Write a clear docstring — the first paragraph becomes the tool description the
+3. Validate user-controlled text, paths, numeric values, and allowlisted options
+   before building Tcl.
+4. Use `_tcl_braced()` for any user-controlled Tcl literal that is not intended
+   to execute as Tcl.
+5. Parse the markers back into structured data (`_parse_markers`, `_f`).
+6. Write a clear docstring — the first paragraph becomes the tool description the
    LLM sees.
-5. Add its name to `EXPECTED_TOOLS` in `tests/test_server.py`.
+7. Add its name to `EXPECTED_TOOLS` in `tests/test_server.py`.
 
 ## Headless gotchas (already handled — don't reintroduce them)
 
