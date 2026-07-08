@@ -16,6 +16,8 @@ uv run pre-commit install
 uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run pytest                # tests (VMD tests auto-skip without VMD)
+RUN_VMD_INTEGRATION=1 uv run pytest -m integration
+uv run python scripts/smoke_vmd.py
 ```
 
 CI runs the same checks on Python 3.10–3.13.
@@ -34,6 +36,15 @@ CI runs the same checks on Python 3.10–3.13.
 6. Write a clear docstring — the first paragraph becomes the tool description the
    LLM sees.
 7. Add its name to `EXPECTED_TOOLS` in `tests/test_server.py`.
+
+## Adding resources or prompts
+
+- Register resources with `@mcp.resource(...)` and keep payloads compact enough
+  for an MCP client to read inline.
+- Register prompts with `@mcp.prompt(...)`; prompt text should guide an agent
+  through safe tool order rather than duplicate README prose.
+- Add names or URIs to `EXPECTED_RESOURCES` / `EXPECTED_PROMPTS` in
+  `tests/test_server.py`.
 
 ## Headless gotchas (already handled — don't reintroduce them)
 

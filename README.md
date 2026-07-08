@@ -28,10 +28,12 @@ without you writing a line of Tcl.**
 
 ## Features
 
-- **Headless analysis** — molecule summaries, atom-selection counts, per-frame RMSD (with
-  optional least-squares fit), radius of gyration, and SASA.
+- **Headless analysis** — molecule summaries, atom-selection counts, RMSD, RMSF, radius of
+  gyration, SASA, selection distances, and contact pairs.
 - **Headless rendering** — ray-traces images with VMD's built-in Tachyon and saves PNG, no
-  X11 / display required. Choose representation, coloring, frame, and resolution.
+  X11 / display required. Choose explicit render controls or curated presets.
+- **MCP-native guidance** — resources expose capabilities, recent outputs, and example recipes;
+  prompts help clients render molecules, analyze trajectories, and debug VMD failures.
 - **Safer local defaults** — structure inputs must exist, render outputs stay under
   `VMD_MCP_ROOT` by default, high-risk tool inputs are bounded, and MCP tool annotations mark
   read-only, write, and escape-hatch behavior.
@@ -50,9 +52,24 @@ without you writing a line of Tcl.**
 | | `count_atoms` | Count atoms matching a VMD selection |
 | **Analyse** | `radius_of_gyration` | Per-frame R_gyr + min/max/mean |
 | | `rmsd` | Per-frame RMSD vs a reference frame (optional alignment) |
+| | `rmsf` | Per-atom RMSF across a trajectory |
 | | `sasa` | Per-frame solvent-accessible surface area |
+| | `distance` | Center-to-center distance between two selections |
+| | `contacts` | Atom-index contact pairs between selections |
 | **Render** | `render_image` | Headless Tachyon ray-trace → PNG |
+| | `render_preset` | Curated render presets for common figures |
 | **Escape hatch** | `run_tcl` | Any VMD Tcl script (with marker parsing) |
+
+## Resources & prompts
+
+| Type | Name / URI | Purpose |
+|------|------------|---------|
+| Resource | `vmd://capabilities` | Tool categories, allowed render options, presets, safety defaults |
+| Resource | `vmd://output` | Recent files below `VMD_MCP_ROOT` |
+| Resource | `vmd://examples` | Compact example workflows |
+| Prompt | `render_molecule` | Safe render workflow using `render_preset` |
+| Prompt | `analyze_trajectory` | RMSD/RMSF/R_gyr/SASA trajectory workflow |
+| Prompt | `debug_vmd_failure` | Triage path for path, selection, rendering, and Tcl errors |
 
 ## Requirements
 
@@ -121,6 +138,9 @@ Check: `claude mcp list` → `vmd: … ✔ Connected`.
 > *"For `topol.tpr` + `md.xtc`, compute the CA-RMSD over the trajectory aligned to
 > frame 0, and report min / max / mean."*
 
+> *"Using `examples/sample.pdb`, run the bundled VMD smoke workflow and render
+> `sample.png` with the `atomistic_lines` preset."*
+
 ## How it works
 
 Each tool generates a small Tcl script and runs `vmd -dispdev text -e script.tcl`. Results are
@@ -152,6 +172,8 @@ trust.
 git clone https://github.com/Alierkn/vmd-mcp && cd vmd-mcp
 uv sync --extra dev
 uv run pytest        # VMD-dependent tests auto-skip if VMD is absent
+RUN_VMD_INTEGRATION=1 uv run pytest -m integration
+uv run python scripts/smoke_vmd.py
 uv run ruff check .
 uv build
 uvx twine check dist/*

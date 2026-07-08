@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import contextlib
 import glob
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -43,6 +44,55 @@ MAX_TIMEOUT_SECONDS = 900
 MIN_RENDER_DIMENSION = 64
 MAX_RENDER_DIMENSION = 4096
 ALLOW_ABSOLUTE_OUTPUTS_ENV = "VMD_MCP_ALLOW_ABSOLUTE_OUTPUTS"
+
+Representation = Literal[
+    "NewCartoon",
+    "Cartoon",
+    "Licorice",
+    "VDW",
+    "CPK",
+    "Lines",
+    "Bonds",
+    "Trace",
+    "Tube",
+    "Surf",
+    "QuickSurf",
+]
+Coloring = Literal[
+    "Name",
+    "Type",
+    "Element",
+    "ResName",
+    "ResID",
+    "Chain",
+    "SegName",
+    "Structure",
+    "ColorID",
+    "Beta",
+    "Occupancy",
+    "Mass",
+    "Charge",
+    "Index",
+]
+Background = Literal[
+    "white",
+    "black",
+    "gray",
+    "silver",
+    "blue",
+    "red",
+    "green",
+    "orange",
+    "yellow",
+    "purple",
+]
+RenderPreset = Literal[
+    "publication_cartoon",
+    "ligand_detail",
+    "surface_overview",
+    "quick_surface",
+    "atomistic_lines",
+]
 
 ALLOWED_REPRESENTATIONS = frozenset(
     {
@@ -91,6 +141,38 @@ ALLOWED_BACKGROUNDS = frozenset(
         "purple",
     }
 )
+RENDER_PRESETS: dict[str, dict[str, str]] = {
+    "publication_cartoon": {
+        "representation": "NewCartoon",
+        "coloring": "Structure",
+        "background": "white",
+        "selection": "protein",
+    },
+    "ligand_detail": {
+        "representation": "Licorice",
+        "coloring": "Name",
+        "background": "white",
+        "selection": "not water",
+    },
+    "surface_overview": {
+        "representation": "Surf",
+        "coloring": "Chain",
+        "background": "white",
+        "selection": "protein",
+    },
+    "quick_surface": {
+        "representation": "QuickSurf",
+        "coloring": "Chain",
+        "background": "white",
+        "selection": "all",
+    },
+    "atomistic_lines": {
+        "representation": "Lines",
+        "coloring": "Name",
+        "background": "black",
+        "selection": "all",
+    },
+}
 
 READ_ONLY_TOOL = ToolAnnotations(
     readOnlyHint=True,
@@ -266,6 +348,12 @@ def _validate_timeout(timeout: int) -> int:
     )
 
 
+def _validate_bool(value: bool, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError(f"{name} must be a boolean.")
+    return value
+
+
 def _has_quit_command(script: str) -> bool:
     for line in script.splitlines():
         stripped = line.strip().lower()
@@ -386,6 +474,14 @@ def _f(markers: list[dict], key: str) -> float | None:
             except ValueError:
                 return None
     return None
+
+
+def _stats(values: list[float]) -> dict[str, float]:
+    return (
+        {"min": min(values), "max": max(values), "mean": sum(values) / len(values)}
+        if values
+        else {}
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -512,13 +608,12 @@ quit
         if "rgyr" in m
     ]
     vals = [p["rgyr"] for p in series]
-    stats = {"min": min(vals), "max": max(vals), "mean": sum(vals) / len(vals)} if vals else {}
     return {
         "ok": res["ok"] and bool(series),
         "selection": selection,
         "n_frames": len(series),
         "series": series,
-        "stats": stats,
+        "stats": _stats(vals),
         "error": res.get("error"),
     }
 
@@ -571,7 +666,6 @@ quit
         if "rmsd" in m
     ]
     vals = [p["rmsd"] for p in series]
-    stats = {"min": min(vals), "max": max(vals), "mean": sum(vals) / len(vals)} if vals else {}
     return {
         "ok": res["ok"] and bool(series),
         "selection": selection,
@@ -579,7 +673,7 @@ quit
         "aligned": align,
         "n_frames": len(series),
         "series": series,
-        "stats": stats,
+        "stats": _stats(vals),
         "error": res.get("error"),
     }
 
@@ -619,14 +713,230 @@ quit
         if "sasa" in m
     ]
     vals = [p["sasa"] for p in series]
-    stats = {"min": min(vals), "max": max(vals), "mean": sum(vals) / len(vals)} if vals else {}
     return {
         "ok": res["ok"] and bool(series),
         "selection": selection,
         "srad": srad,
         "n_frames": len(series),
         "series": series,
-        "stats": stats,
+        "stats": _stats(vals),
+        "error": res.get("error"),
+    }
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def rmsf(
+    structure: str,
+    trajectory: str,
+    selection: str = "protein and name CA",
+) -> dict:
+    """Per-atom root-mean-square fluctuation (RMSF) across a trajectory.
+
+    Returns one row per selected atom plus min/max/mean RMSF in Angstrom. Use
+    selections such as ``"protein and name CA"`` for compact per-residue traces.
+    """
+    try:
+        structure = _validate_existing_file(structure, "structure")
+        trajectory = _validate_existing_file(trajectory, "trajectory")
+        selection = _validate_selection(selection)
+    except ValidationError as exc:
+        return _validation_error(exc)
+
+    tcl = f"""
+{_load_block(structure, trajectory)}
+set sel [atomselect $mol {_tcl_braced(selection)}]
+set nframes [molinfo $mol get numframes]
+set natoms [$sel num]
+if {{$natoms == 0 || $nframes < 2}} {{
+  puts "{MARKER} status=empty natoms=$natoms nframes=$nframes"
+  quit
+}}
+set values [measure rmsf $sel first 0 last [expr {{$nframes - 1}}] step 1]
+set indices [$sel get index]
+set names [$sel get name]
+set resids [$sel get resid]
+set resnames [$sel get resname]
+set chains [$sel get chain]
+for {{set i 0}} {{$i < [llength $values]}} {{incr i}} {{
+  set chain [lindex $chains $i]
+  if {{$chain eq ""}} {{ set chain NA }}
+  puts "{MARKER} atom=$i index=[lindex $indices $i] name=[lindex $names $i] resid=[lindex $resids $i] resname=[lindex $resnames $i] chain=$chain rmsf=[lindex $values $i]"
+}}
+quit
+"""
+    res = _run_tcl(tcl)
+    atoms = [
+        {
+            "atom": int(m["atom"]),
+            "index": int(m["index"]),
+            "name": m["name"],
+            "resid": int(m["resid"]),
+            "resname": m["resname"],
+            "chain": None if m["chain"] == "NA" else m["chain"],
+            "rmsf": float(m["rmsf"]),
+        }
+        for m in res.get("markers", [])
+        if "rmsf" in m
+    ]
+    values = [atom["rmsf"] for atom in atoms]
+    return {
+        "ok": res["ok"] and bool(atoms),
+        "selection": selection,
+        "n_atoms": len(atoms),
+        "atoms": atoms,
+        "stats": _stats(values),
+        "error": res.get("error"),
+    }
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def distance(
+    structure: str,
+    selection1: str,
+    selection2: str,
+    trajectory: str | None = None,
+    frame: int = 0,
+    all_frames: bool = False,
+    mass_weighted: bool = True,
+) -> dict:
+    """Distance between the centers of two atom selections.
+
+    By default the distance is measured at one frame. Set ``all_frames=True`` to
+    return a per-frame series for a trajectory.
+    """
+    try:
+        structure = _validate_existing_file(structure, "structure")
+        trajectory = _validate_existing_file(trajectory, "trajectory") if trajectory else None
+        selection1 = _validate_selection(selection1)
+        selection2 = _validate_selection(selection2)
+        frame = _validate_int_range(frame, "frame", min_value=0)
+        all_frames = _validate_bool(all_frames, "all_frames")
+        mass_weighted = _validate_bool(mass_weighted, "mass_weighted")
+    except ValidationError as exc:
+        return _validation_error(exc)
+
+    weight = "weight mass" if mass_weighted else ""
+    frame_loop = (
+        """
+set start 0
+set stop [expr {[molinfo $mol get numframes] - 1}]
+"""
+        if all_frames
+        else f"""
+set start {frame}
+set stop {frame}
+"""
+    )
+    tcl = f"""
+{_load_block(structure, trajectory)}
+set sel1 [atomselect $mol {_tcl_braced(selection1)}]
+set sel2 [atomselect $mol {_tcl_braced(selection2)}]
+if {{[$sel1 num] == 0 || [$sel2 num] == 0}} {{
+  puts "{MARKER} status=empty n1=[$sel1 num] n2=[$sel2 num]"
+  quit
+}}
+{frame_loop}
+for {{set i $start}} {{$i <= $stop}} {{incr i}} {{
+  molinfo $mol set frame $i
+  $sel1 frame $i
+  $sel2 frame $i
+  set c1 [measure center $sel1 {weight}]
+  set c2 [measure center $sel2 {weight}]
+  set d [veclength [vecsub $c1 $c2]]
+  puts "{MARKER} frame=$i distance=[format %.6f $d] n1=[$sel1 num] n2=[$sel2 num]"
+}}
+quit
+"""
+    res = _run_tcl(tcl)
+    series = [
+        {
+            "frame": int(m["frame"]),
+            "distance": float(m["distance"]),
+            "n1": int(m["n1"]),
+            "n2": int(m["n2"]),
+        }
+        for m in res.get("markers", [])
+        if "distance" in m
+    ]
+    values = [point["distance"] for point in series]
+    return {
+        "ok": res["ok"] and bool(series),
+        "selection1": selection1,
+        "selection2": selection2,
+        "mass_weighted": mass_weighted,
+        "n_frames": len(series),
+        "series": series,
+        "stats": _stats(values),
+        "error": res.get("error"),
+    }
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL)
+def contacts(
+    structure: str,
+    selection1: str,
+    selection2: str = "all",
+    cutoff: float = 4.0,
+    trajectory: str | None = None,
+    frame: int = 0,
+    max_pairs: int = 200,
+) -> dict:
+    """Find atom-index contact pairs between two selections at one frame.
+
+    ``cutoff`` is in Angstrom. The total contact count is always returned; the
+    explicit ``pairs`` list is clipped to ``max_pairs`` to keep MCP responses
+    bounded.
+    """
+    try:
+        structure = _validate_existing_file(structure, "structure")
+        trajectory = _validate_existing_file(trajectory, "trajectory") if trajectory else None
+        selection1 = _validate_selection(selection1)
+        selection2 = _validate_selection(selection2)
+        cutoff = _validate_float_range(cutoff, "cutoff", min_value=0.1, max_value=50.0)
+        frame = _validate_int_range(frame, "frame", min_value=0)
+        max_pairs = _validate_int_range(max_pairs, "max_pairs", min_value=0, max_value=10000)
+    except ValidationError as exc:
+        return _validation_error(exc)
+
+    tcl = f"""
+{_load_block(structure, trajectory)}
+animate goto {frame}
+set sel1 [atomselect $mol {_tcl_braced(selection1)} frame {frame}]
+set sel2 [atomselect $mol {_tcl_braced(selection2)} frame {frame}]
+if {{[$sel1 num] == 0 || [$sel2 num] == 0}} {{
+  puts "{MARKER} frame={frame} count=0 clipped=0 n1=[$sel1 num] n2=[$sel2 num]"
+  quit
+}}
+set pairs [measure contacts {cutoff} $sel1 $sel2]
+set left [lindex $pairs 0]
+set right [lindex $pairs 1]
+set count [llength $left]
+set limit [expr {{$count < {max_pairs} ? $count : {max_pairs}}}]
+puts "{MARKER} frame={frame} count=$count clipped=[expr {{$count > $limit}}] n1=[$sel1 num] n2=[$sel2 num]"
+for {{set i 0}} {{$i < $limit}} {{incr i}} {{
+  puts "{MARKER} pair=$i atom1=[lindex $left $i] atom2=[lindex $right $i]"
+}}
+quit
+"""
+    res = _run_tcl(tcl)
+    summary = next((m for m in res.get("markers", []) if "count" in m), {})
+    pairs = [
+        {"atom1": int(m["atom1"]), "atom2": int(m["atom2"])}
+        for m in res.get("markers", [])
+        if "pair" in m
+    ]
+    return {
+        "ok": res["ok"] and bool(summary),
+        "selection1": selection1,
+        "selection2": selection2,
+        "cutoff": cutoff,
+        "frame": frame,
+        "count": int(summary.get("count", 0)) if summary else None,
+        "pairs": pairs,
+        "pairs_returned": len(pairs),
+        "pairs_clipped": summary.get("clipped") == "1" if summary else None,
+        "n1": int(summary.get("n1", 0)) if summary else None,
+        "n2": int(summary.get("n2", 0)) if summary else None,
         "error": res.get("error"),
     }
 
@@ -642,12 +952,12 @@ def render_image(
     output: str = "render.png",
     trajectory: str | None = None,
     selection: str = "all",
-    representation: str = "NewCartoon",
-    coloring: str = "Structure",
+    representation: Representation = "NewCartoon",
+    coloring: Coloring = "Structure",
     frame: int = 0,
     width: int = 1000,
     height: int = 800,
-    background: str = "white",
+    background: Background = "white",
 ) -> dict:
     """Ray-trace a molecular image HEADLESSLY with VMD's built-in Tachyon and
     save it as PNG (no display needed).
@@ -754,6 +1064,44 @@ quit
     }
 
 
+@mcp.tool(annotations=WRITE_TOOL)
+def render_preset(
+    structure: str,
+    output: str = "render.png",
+    preset: RenderPreset = "publication_cartoon",
+    trajectory: str | None = None,
+    selection: str | None = None,
+    frame: int = 0,
+    width: int = 1200,
+    height: int = 900,
+) -> dict:
+    """Render a molecule using a curated publication-oriented visual preset.
+
+    Presets reduce brittle representation/coloring choices while still allowing
+    a custom atom ``selection`` when needed.
+    """
+    try:
+        preset = _validate_choice(preset, "preset", frozenset(RENDER_PRESETS))
+    except ValidationError as exc:
+        return _validation_error(exc)
+
+    config = RENDER_PRESETS[preset]
+    res = render_image(
+        structure=structure,
+        output=output,
+        trajectory=trajectory,
+        selection=selection or config["selection"],
+        representation=config["representation"],  # type: ignore[arg-type]
+        coloring=config["coloring"],  # type: ignore[arg-type]
+        frame=frame,
+        width=width,
+        height=height,
+        background=config["background"],  # type: ignore[arg-type]
+    )
+    res["preset"] = preset
+    return res
+
+
 # --------------------------------------------------------------------------- #
 # Generic escape hatch
 # --------------------------------------------------------------------------- #
@@ -775,6 +1123,170 @@ def run_tcl(script: str, timeout: int = 300) -> dict:
 
     res = _run_tcl(script, timeout=timeout, include_output=True)
     return res
+
+
+# --------------------------------------------------------------------------- #
+# MCP resources and prompts
+# --------------------------------------------------------------------------- #
+
+
+def _output_files(max_files: int = 50) -> list[dict[str, Any]]:
+    files = [p for p in ROOT.rglob("*") if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return [
+        {
+            "path": str(path),
+            "relative_path": str(path.relative_to(ROOT)),
+            "size_bytes": path.stat().st_size,
+            "suffix": path.suffix.lstrip("."),
+        }
+        for path in files[:max_files]
+    ]
+
+
+@mcp.resource(
+    "vmd://capabilities",
+    name="capabilities",
+    title="VMD MCP capabilities",
+    description="Tool categories, render presets, allowed visual options, and safety defaults.",
+    mime_type="application/json",
+)
+def capabilities_resource() -> str:
+    """Expose a compact machine-readable overview of this server."""
+    payload = {
+        "server": "vmd-mcp",
+        "vmd_bin": VMD_BIN,
+        "output_root": str(ROOT),
+        "tools": {
+            "introspection": ["vmd_info", "molecule_info", "count_atoms"],
+            "analysis": [
+                "radius_of_gyration",
+                "rmsd",
+                "rmsf",
+                "sasa",
+                "distance",
+                "contacts",
+            ],
+            "rendering": ["render_image", "render_preset"],
+            "escape_hatch": ["run_tcl"],
+        },
+        "render_presets": RENDER_PRESETS,
+        "allowed_representations": sorted(ALLOWED_REPRESENTATIONS),
+        "allowed_colorings": sorted(ALLOWED_COLORINGS),
+        "allowed_backgrounds": sorted(ALLOWED_BACKGROUNDS),
+        "safety": {
+            "absolute_render_outputs": os.environ.get(ALLOW_ABSOLUTE_OUTPUTS_ENV) == "1",
+            "absolute_output_override": ALLOW_ABSOLUTE_OUTPUTS_ENV,
+            "max_timeout_seconds": MAX_TIMEOUT_SECONDS,
+            "max_output_chars": MAX_OUTPUT_CHARS,
+        },
+    }
+    return json.dumps(payload, indent=2)
+
+
+@mcp.resource(
+    "vmd://output",
+    name="output",
+    title="VMD MCP output files",
+    description="Recent files written below VMD_MCP_ROOT.",
+    mime_type="application/json",
+)
+def output_resource() -> str:
+    """List recent files in the configured VMD_MCP_ROOT output directory."""
+    return json.dumps({"root": str(ROOT), "files": _output_files()}, indent=2)
+
+
+@mcp.resource(
+    "vmd://examples",
+    name="examples",
+    title="VMD MCP example workflows",
+    description="Short prompt recipes for common structure, trajectory, and rendering tasks.",
+    mime_type="text/markdown",
+)
+def examples_resource() -> str:
+    """Return compact recipe prompts for MCP clients."""
+    return """# vmd-mcp examples
+
+## Inspect
+Load `examples/sample.pdb`, run `molecule_info`, then count `all` and `name CA`.
+
+## Analyze a trajectory
+For a structure and trajectory, run `rmsd`, `rmsf`, `radius_of_gyration`, and `sasa`
+on `protein and name CA` or another explicit selection.
+
+## Measure relationships
+Use `distance` for center-to-center distances and `contacts` for atom-pair contacts
+between two selections.
+
+## Render
+Use `render_preset` first. Fall back to `render_image` only when you need explicit
+representation, coloring, and background controls.
+"""
+
+
+@mcp.prompt(
+    name="render_molecule",
+    title="Render molecule",
+    description="Plan a safe headless molecular render with a curated preset.",
+)
+def render_molecule_prompt(
+    structure_path: str,
+    output: str = "render.png",
+    selection: str = "protein",
+    preset: RenderPreset = "publication_cartoon",
+) -> str:
+    return f"""Use vmd-mcp to render a molecule safely.
+
+1. Run `molecule_info` for `{structure_path}` and confirm the target selection exists.
+2. Run `render_preset` with:
+   - structure: `{structure_path}`
+   - output: `{output}`
+   - selection: `{selection}`
+   - preset: `{preset}`
+3. Report the final image path, format, dimensions, and any validation error.
+Keep the output path relative unless the user explicitly configured absolute outputs.
+"""
+
+
+@mcp.prompt(
+    name="analyze_trajectory",
+    title="Analyze trajectory",
+    description="Run a compact trajectory-analysis workflow with RMSD, RMSF, Rgyr, and SASA.",
+)
+def analyze_trajectory_prompt(
+    structure_path: str,
+    trajectory_path: str,
+    selection: str = "protein and name CA",
+) -> str:
+    return f"""Use vmd-mcp to analyze a trajectory.
+
+1. Run `molecule_info` with structure `{structure_path}` and trajectory `{trajectory_path}`.
+2. Run `rmsd` with selection `{selection}`, reference frame 0, and alignment enabled.
+3. Run `rmsf` with the same selection.
+4. Run `radius_of_gyration` and `sasa`; if `{selection}` is too narrow, use `protein`.
+5. Summarize min/max/mean values and flag empty selections or VMD errors.
+"""
+
+
+@mcp.prompt(
+    name="debug_vmd_failure",
+    title="Debug VMD failure",
+    description="Diagnose common VMD path, selection, rendering, and Tcl failures.",
+)
+def debug_vmd_failure_prompt(error: str) -> str:
+    return f"""Debug this vmd-mcp failure:
+
+```text
+{error}
+```
+
+Checklist:
+1. Run `vmd_info` to confirm VMD discovery.
+2. Confirm structure and trajectory paths exist and are readable files.
+3. If a selection is involved, run `count_atoms` with a simpler selection like `all`.
+4. If rendering failed, check `vmd://output` and retry with `render_preset`.
+5. Use `run_tcl` only for trusted diagnostic Tcl and keep the timeout small.
+"""
 
 
 def main() -> None:
