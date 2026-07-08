@@ -7,6 +7,7 @@ automatically when VMD is not installed (e.g. on CI).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -26,9 +27,25 @@ EXPECTED_TOOLS = {
     "count_atoms",
     "radius_of_gyration",
     "rmsd",
+    "rmsf",
     "sasa",
+    "distance",
+    "contacts",
     "render_image",
+    "render_preset",
     "run_tcl",
+}
+
+EXPECTED_RESOURCES = {
+    "vmd://capabilities",
+    "vmd://output",
+    "vmd://examples",
+}
+
+EXPECTED_PROMPTS = {
+    "render_molecule",
+    "analyze_trajectory",
+    "debug_vmd_failure",
 }
 
 
@@ -67,11 +84,55 @@ def test_tool_annotations_classify_risk():
 
     assert tools["vmd_info"].annotations.readOnlyHint is True
     assert tools["vmd_info"].annotations.destructiveHint is False
+    assert tools["rmsf"].annotations.readOnlyHint is True
+    assert tools["distance"].annotations.readOnlyHint is True
+    assert tools["contacts"].annotations.readOnlyHint is True
     assert tools["count_atoms"].annotations.readOnlyHint is True
     assert tools["render_image"].annotations.readOnlyHint is False
     assert tools["render_image"].annotations.destructiveHint is True
+    assert tools["render_preset"].annotations.destructiveHint is True
     assert tools["run_tcl"].annotations.readOnlyHint is False
     assert tools["run_tcl"].annotations.destructiveHint is True
+
+
+def test_resources_registered_and_readable():
+    resources = asyncio.run(server.mcp.list_resources())
+    uris = {str(resource.uri) for resource in resources}
+
+    assert uris >= EXPECTED_RESOURCES
+
+    content = list(asyncio.run(server.mcp.read_resource("vmd://capabilities")))[0].content
+    capabilities = json.loads(content)
+    assert capabilities["server"] == "vmd-mcp"
+    assert "rmsf" in capabilities["tools"]["analysis"]
+    assert "publication_cartoon" in capabilities["render_presets"]
+
+
+def test_output_resource_lists_root_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    (tmp_path / "renders").mkdir()
+    (tmp_path / "renders" / "sample.png").write_bytes(b"fake")
+
+    content = list(asyncio.run(server.mcp.read_resource("vmd://output")))[0].content
+    payload = json.loads(content)
+
+    assert payload["root"] == str(tmp_path)
+    assert payload["files"][0]["relative_path"] == "renders/sample.png"
+
+
+def test_prompts_registered_and_renderable():
+    prompts = asyncio.run(server.mcp.list_prompts())
+    names = {prompt.name for prompt in prompts}
+
+    assert names >= EXPECTED_PROMPTS
+
+    prompt = asyncio.run(
+        server.mcp.get_prompt(
+            "render_molecule",
+            {"structure_path": "examples/sample.pdb", "output": "sample.png"},
+        )
+    )
+    assert "render_preset" in prompt.messages[0].content.text
 
 
 def test_tcl_quote_escapes_braces():
@@ -183,6 +244,123 @@ def test_render_validation_rejects_bad_dimensions(tmp_path):
 
     assert res["ok"] is False
     assert "width must be >=" in res["error"]
+
+
+def test_render_preset_uses_curated_defaults(monkeypatch, tmp_path):
+    structure = _sample_structure(tmp_path)
+    captured = {}
+
+    def fake_render_image(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "image_path": "/tmp/render.png"}
+
+    monkeypatch.setattr(server, "render_image", fake_render_image)
+
+    res = server.render_preset(str(structure), output="preset.png", preset="ligand_detail")
+
+    assert res["ok"] is True
+    assert res["preset"] == "ligand_detail"
+    assert captured["representation"] == "Licorice"
+    assert captured["coloring"] == "Name"
+    assert captured["selection"] == "not water"
+
+
+def test_render_preset_rejects_unknown_preset(tmp_path):
+    structure = _sample_structure(tmp_path)
+
+    res = server.render_preset(str(structure), preset="poster_mode")
+
+    assert res["ok"] is False
+    assert "preset must be one of" in res["error"]
+
+
+def test_rmsf_parses_atom_series(monkeypatch, tmp_path):
+    structure = _sample_structure(tmp_path)
+    trajectory = tmp_path / "traj.dcd"
+    trajectory.write_text("placeholder")
+
+    def fake_run_tcl(script, *args, **kwargs):
+        assert "measure rmsf" in script
+        return {
+            "ok": True,
+            "markers": [
+                {
+                    "atom": "0",
+                    "index": "1",
+                    "name": "CA",
+                    "resid": "1",
+                    "resname": "ALA",
+                    "chain": "A",
+                    "rmsf": "0.25",
+                },
+                {
+                    "atom": "1",
+                    "index": "2",
+                    "name": "CB",
+                    "resid": "1",
+                    "resname": "ALA",
+                    "chain": "NA",
+                    "rmsf": "0.75",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(server, "_run_tcl", fake_run_tcl)
+
+    res = server.rmsf(str(structure), str(trajectory), selection="protein")
+
+    assert res["ok"] is True
+    assert res["n_atoms"] == 2
+    assert res["atoms"][1]["chain"] is None
+    assert res["stats"] == {"min": 0.25, "max": 0.75, "mean": 0.5}
+
+
+def test_distance_parses_series(monkeypatch, tmp_path):
+    structure = _sample_structure(tmp_path)
+    captured = {}
+
+    def fake_run_tcl(script, *args, **kwargs):
+        captured["script"] = script
+        return {
+            "ok": True,
+            "markers": [
+                {"frame": "0", "distance": "3.500000", "n1": "1", "n2": "1"},
+                {"frame": "1", "distance": "4.500000", "n1": "1", "n2": "1"},
+            ],
+        }
+
+    monkeypatch.setattr(server, "_run_tcl", fake_run_tcl)
+
+    res = server.distance(str(structure), "name N", "name CA", all_frames=True)
+
+    assert res["ok"] is True
+    assert "set start 0" in captured["script"]
+    assert res["n_frames"] == 2
+    assert res["stats"]["mean"] == 4.0
+
+
+def test_contacts_clips_pair_list(monkeypatch, tmp_path):
+    structure = _sample_structure(tmp_path)
+
+    def fake_run_tcl(script, *args, **kwargs):
+        assert "measure contacts 4.0" in script
+        return {
+            "ok": True,
+            "markers": [
+                {"frame": "0", "count": "3", "clipped": "1", "n1": "2", "n2": "2"},
+                {"pair": "0", "atom1": "1", "atom2": "2"},
+                {"pair": "1", "atom1": "1", "atom2": "3"},
+            ],
+        }
+
+    monkeypatch.setattr(server, "_run_tcl", fake_run_tcl)
+
+    res = server.contacts(str(structure), "all", "all", max_pairs=2)
+
+    assert res["ok"] is True
+    assert res["count"] == 3
+    assert res["pairs_clipped"] is True
+    assert res["pairs"] == [{"atom1": 1, "atom2": 2}, {"atom1": 1, "atom2": 3}]
 
 
 def test_run_tcl_rejects_timeout_over_cap():

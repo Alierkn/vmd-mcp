@@ -11,6 +11,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escape hatch.
 - ImageMagick `magick` / `convert` fallback for TGA to PNG conversion when
   macOS `sips` is unavailable.
+- New analysis tools: `rmsf`, `distance`, and `contacts`.
+- `render_preset` for curated publication-oriented render defaults.
+- MCP resources: `vmd://capabilities`, `vmd://output`, and `vmd://examples`.
+- MCP prompts: `render_molecule`, `analyze_trajectory`, and `debug_vmd_failure`.
+- `examples/sample.pdb` plus `scripts/smoke_vmd.py` for a one-command real-VMD
+  smoke workflow.
+- Optional `integration` pytest marker gated by `RUN_VMD_INTEGRATION=1`.
 
 ### Changed
 - Hardened typed tools with explicit validation for file inputs, selections,
